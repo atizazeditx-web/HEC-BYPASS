@@ -1,0 +1,325 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>UID Manager</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .badge-wide { min-width: 72px; }
+    </style>
+  </head>
+  <body class="bg-light">
+    <div class="container py-4">
+      <div class="d-flex align-items-center justify-content-between mb-3">
+        <h1 class="mb-0">UID Manager</h1>
+        <div class="input-group" style="max-width: 480px;">
+          <span class="input-group-text">Admin Token</span>
+          <input id="adminToken" type="password" class="form-control" placeholder="enter token…">
+          <button class="btn btn-outline-secondary" id="saveTokenBtn" title="Save token in this browser">Save</button>
+        </div>
+      </div>
+
+      <!-- Add UID Card -->
+      <div class="card mb-3">
+        <div class="card-body">
+          <form id="addForm" class="row gy-2 gx-2 align-items-end">
+            <div class="col-12 col-md-4">
+              <label class="form-label">UID</label>
+              <input id="uid" class="form-control mono" placeholder="UID" required>
+            </div>
+            <div class="col-6 col-md-3">
+              <label class="form-label">Duration</label>
+              <select id="duration" class="form-select">
+                <option value="1d">1 day</option>
+                <option value="7d">7 days</option>
+                <option value="2d" selected>2 days</option>
+                <option value="forever">Forever</option>
+              </select>
+            </div>
+            <div class="col-6 col-md-3">
+              <label class="form-label">Meta (optional)</label>
+              <input id="meta" class="form-control" placeholder="notes…">
+            </div>
+            <div class="col-12 col-md-2 d-grid">
+              <button class="btn btn-primary" type="submit">Add UID</button>
+            </div>
+            <div class="col-12 d-flex gap-2">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="useGet" checked>
+                <label class="form-check-label" for="useGet">Use GET endpoint</label>
+              </div>
+              <button class="btn btn-outline-secondary btn-sm" id="copyGetLink" type="button">Copy GET Link</button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <div id="alert" class="alert d-none" role="alert"></div>
+
+      <!-- List -->
+      <div class="card">
+        <div class="card-body">
+          <div class="d-flex align-items-center justify-content-between mb-2">
+            <h5 class="mb-0">Recent UIDs</h5>
+            <div class="btn-group">
+              <button class="btn btn-outline-secondary btn-sm" id="refreshBtn">Refresh</button>
+              <button class="btn btn-outline-danger btn-sm" id="clearExpiredBtn">Clear Expired</button>
+            </div>
+          </div>
+          <div class="table-responsive">
+            <table class="table table-sm align-middle">
+              <thead>
+                <tr>
+                  <th>UID</th>
+                  <th>Status</th>
+                  <th>Expires</th>
+                  <th class="text-end">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="uidTable">
+                {% for u in uids %}
+                <tr data-uid="{{u.uid}}">
+                  <td class="mono">{{u.uid}}</td>
+                  <td>
+                    {% if u.banned %}<span class="badge bg-danger badge-wide">Banned</span>
+                    {% elif u.paused %}<span class="badge bg-warning text-dark badge-wide">Paused</span>
+                    {% else %}<span class="badge bg-success badge-wide">Active</span>{% endif %}
+                  </td>
+                  <td class="mono">{{u.expires_at or "Never"}}</td>
+                  <td class="text-end">
+                    <div class="btn-group btn-group-sm">
+                      <button class="btn btn-outline-danger" onclick="banUID('{{u.uid}}')">Ban</button>
+                      <button class="btn btn-outline-success" onclick="unbanUID('{{u.uid}}')">Unban</button>
+                      <button class="btn btn-outline-warning" onclick="pauseUID('{{u.uid}}')">Pause</button>
+                      <button class="btn btn-outline-primary" onclick="unpauseUID('{{u.uid}}')">Unpause</button>
+                      <button class="btn btn-outline-secondary" onclick="delUID('{{u.uid}}')">Delete</button>
+                      <button class="btn btn-outline-dark" onclick="copyLinks('{{u.uid}}')">Links</button>
+                    </div>
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <script>
+      // --- helpers ---
+      const $ = (s)=>document.querySelector(s);
+      const alertBox = $("#alert");
+      const adminTokenInput = $("#adminToken");
+
+      function showAlert(msg, type="info"){
+        alertBox.className = "alert alert-"+type;
+        alertBox.textContent = msg;
+        alertBox.classList.remove("d-none");
+        setTimeout(()=>alertBox.classList.add("d-none"), 3000);
+      }
+
+      function getToken(){
+        return adminTokenInput.value || localStorage.getItem("uid_admin_token") || "";
+      }
+      function setToken(v){
+        adminTokenInput.value = v || "";
+        if(v) localStorage.setItem("uid_admin_token", v);
+      }
+
+      // load token from localStorage on load
+      (function init(){
+        setToken(localStorage.getItem("uid_admin_token") || new URLSearchParams(location.search).get("admin_token") || "");
+      })();
+
+      $("#saveTokenBtn").onclick = ()=>{ setToken(adminTokenInput.value); showAlert("Token saved in this browser","success"); };
+
+      // --- API base + wrappers ---
+      const API = {
+        addGET: (uid, duration, meta="") =>
+          fetch(`/api/allow/${encodeURIComponent(uid)}/${encodeURIComponent(duration)}?key=${encodeURIComponent(getToken())}` + (meta?`&meta=${encodeURIComponent(meta)}`:"")),
+        addPOST: (uid, hours, meta="") =>
+          fetch(`/api/add?admin_token=${encodeURIComponent(getToken())}`, {
+            method: "POST", headers: {"Content-Type":"application/json"},
+            body: JSON.stringify({ uid, hours, meta })
+          }),
+        ban: (uid)=> fetch(`/api/deny/${encodeURIComponent(uid)}?key=${encodeURIComponent(getToken())}`),
+        unban: (uid)=> fetch(`/api/allow_unban/${encodeURIComponent(uid)}?key=${encodeURIComponent(getToken())}`),
+        pause: (uid)=> fetch(`/api/pause/${encodeURIComponent(uid)}?key=${encodeURIComponent(getToken())}`),
+        unpause: (uid)=> fetch(`/api/unpause/${encodeURIComponent(uid)}?key=${encodeURIComponent(getToken())}`),
+        del: (uid)=> fetch(`/api/remove/${encodeURIComponent(uid)}?key=${encodeURIComponent(getToken())}`),
+        list: ()=> fetch(`/api/list`),
+        clearExpired: ()=> fetch(`/api/clear_expired/yes?key=${encodeURIComponent(getToken())}`),
+      };
+
+      // duration -> hours (for POST) mapper
+      function durToHours(d){
+        const s = String(d || "").toLowerCase();
+        if(s === "forever" || s === "never" || s === "0") return null;
+        if(s.endsWith("d")) return parseFloat(s)*24;
+        if(s.endsWith("h")) return parseFloat(s);
+        if(s.endsWith("m")) return parseFloat(s)/60;
+        const n = parseFloat(s); return isFinite(n)? n : null;
+      }
+
+      // --- Add UID form ---
+      $("#addForm").onsubmit = async (ev)=>{
+        ev.preventDefault();
+        const uid = $("#uid").value.trim();
+        const duration = $("#duration").value;
+        const meta = $("#meta").value.trim();
+        const useGET = $("#useGet").checked;
+        if(!uid){ showAlert("UID is required","warning"); return false; }
+
+        try{
+          let res;
+          if(useGET){
+            res = await API.addGET(uid, duration, meta);
+          } else {
+            res = await API.addPOST(uid, durToHours(duration), meta);
+          }
+          const j = await res.json();
+          if(j.ok){
+            showAlert(j.message || "Uid Added","success");
+            appendOrUpdateRow({uid, banned:false, paused:false, expires_at: j.expires_at || "Never"});
+          } else {
+            showAlert(j.message || "Failed", "danger");
+          }
+        } catch(e){
+          showAlert("Error: "+e, "danger");
+        }
+        return false;
+      };
+
+      // Copy GET link for the current form values
+      $("#copyGetLink").onclick = ()=>{
+        const uid = $("#uid").value.trim();
+        const duration = $("#duration").value;
+        const token = getToken();
+        if(!uid || !token){ showAlert("Enter UID and Token first","warning"); return; }
+        const link = `${location.origin}/api/allow/${encodeURIComponent(uid)}/${encodeURIComponent(duration)}?key=${encodeURIComponent(token)}`;
+        navigator.clipboard.writeText(link).then(()=>showAlert("GET link copied","success"));
+      };
+
+      // --- Row actions ---
+      async function banUID(uid){ await action(uid, API.ban, "Uid Is Banned", {banned:true, paused:false}); }
+      async function unbanUID(uid){ await action(uid, API.unban, "Uid Unbanned", {banned:false}); }
+      async function pauseUID(uid){ await action(uid, API.pause, "Uid Is Paused", {paused:true}); }
+      async function unpauseUID(uid){ await action(uid, API.unpause, "Uid Is Unpaused", {paused:false}); }
+      async function delUID(uid){
+        if(!confirm(`Delete UID ${uid}?`)) return;
+        await action(uid, API.del, "Uid Deleted", null, true);
+      }
+
+      async function action(uid, fn, okMsg, patch=null, remove=false){
+        try{
+          const r = await fn(uid);
+          const j = await r.json();
+          if(j.ok){
+            showAlert(okMsg, "success");
+            if(remove){ removeRow(uid); }
+            else { patchRow(uid, patch); }
+          } else {
+            showAlert(j.message || "Failed", "danger");
+          }
+        } catch(e){
+          showAlert("Error: "+e, "danger");
+        }
+      }
+
+      function rowFor(uid){ return document.querySelector(`tr[data-uid="${CSS.escape(uid)}"]`); }
+
+      function patchRow(uid, patch){
+        const tr = rowFor(uid);
+        if(!tr) return;
+        if(patch && typeof patch.banned === "boolean") {
+          setBadge(tr, patch);
+        }
+        if(patch && typeof patch.paused === "boolean") {
+          setBadge(tr, patch);
+        }
+      }
+
+      function setBadge(tr, state){
+        const td = tr.children[1];
+        if(!td) return;
+        if(state.banned) td.innerHTML = '<span class="badge bg-danger badge-wide">Banned</span>';
+        else if(state.paused) td.innerHTML = '<span class="badge bg-warning text-dark badge-wide">Paused</span>';
+        else td.innerHTML = '<span class="badge bg-success badge-wide">Active</span>';
+      }
+
+      function removeRow(uid){
+        const tr = rowFor(uid);
+        if(tr) tr.remove();
+      }
+
+      function appendOrUpdateRow(item){
+        let tr = rowFor(item.uid);
+        if(!tr){
+          tr = document.createElement("tr");
+          tr.setAttribute("data-uid", item.uid);
+          tr.innerHTML = `
+            <td class="mono"></td>
+            <td></td>
+            <td class="mono"></td>
+            <td class="text-end">
+              <div class="btn-group btn-group-sm">
+                <button class="btn btn-outline-danger" onclick="banUID('${item.uid}')">Ban</button>
+                <button class="btn btn-outline-success" onclick="unbanUID('${item.uid}')">Unban</button>
+                <button class="btn btn-outline-warning" onclick="pauseUID('${item.uid}')">Pause</button>
+                <button class="btn btn-outline-primary" onclick="unpauseUID('${item.uid}')">Unpause</button>
+                <button class="btn btn-outline-secondary" onclick="delUID('${item.uid}')">Delete</button>
+                <button class="btn btn-outline-dark" onclick="copyLinks('${item.uid}')">Links</button>
+              </div>
+            </td>`;
+          $("#uidTable").prepend(tr);
+        }
+        tr.children[0].textContent = item.uid;
+        setBadge(tr, item);
+        tr.children[2].textContent = item.expires_at || "Never";
+      }
+
+      $("#refreshBtn").onclick = async ()=>{
+        try{
+          const r = await API.list();
+          const j = await r.json();
+          if(j.ok){
+            const tbody = $("#uidTable");
+            tbody.innerHTML = "";
+            j.uids.forEach(u => appendOrUpdateRow({
+              uid: u.uid, banned: u.banned, paused: u.paused, expires_at: u.expires_at || "Never"
+            }));
+            showAlert("Refreshed","success");
+          } else showAlert("Failed to refresh","danger");
+        } catch(e){ showAlert("Error: "+e, "danger"); }
+      };
+
+      $("#clearExpiredBtn").onclick = async ()=>{
+        if(!confirm("Clear expired UIDs?")) return;
+        try{
+          const r = await API.clearExpired();
+          const j = await r.json();
+          if(j.ok){ showAlert(j.message + ` (${j.count})`, "success"); $("#refreshBtn").click(); }
+          else showAlert(j.message||"Failed", "danger");
+        } catch(e){ showAlert("Error: "+e, "danger"); }
+      };
+
+      // Copy handy GET links for a UID
+      window.copyLinks = (uid)=>{
+        const key = getToken();
+        if(!key){ showAlert("Save admin token first","warning"); return; }
+        const base = location.origin;
+        const links = [
+          `${base}/api/allow/${encodeURIComponent(uid)}/2d?key=${encodeURIComponent(key)}`,
+          `${base}/api/deny/${encodeURIComponent(uid)}?key=${encodeURIComponent(key)}`,
+          `${base}/api/pause/${encodeURIComponent(uid)}?key=${encodeURIComponent(key)}`,
+          `${base}/api/unpause/${encodeURIComponent(uid)}?key=${encodeURIComponent(key)}`,
+          `${base}/api/remove/${encodeURIComponent(uid)}?key=${encodeURIComponent(key)}`
+        ].join('\n');
+        navigator.clipboard.writeText(links).then(()=>showAlert("Links copied","success"));
+      };
+    </script>
+  </body>
+</html>
